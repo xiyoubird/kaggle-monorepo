@@ -48,27 +48,38 @@ def rank01(x: np.ndarray) -> np.ndarray:
     return rankdata(x) / len(x)
 
 
-def fit_weights(R: np.ndarray, y: np.ndarray) -> np.ndarray:
-    """在给定数据上搜索非负权重（和归一化为 1），使排名平均的 AUC 最大。"""
+def fit_weights(R: np.ndarray, y: np.ndarray, n_steps: int = 30) -> np.ndarray:
+    """Caruana 贪心集成选择：每次挑一个"加入后 AUC 提升最多"的模型。
+
+    为什么不用 Nelder-Mead 直接优化权重：
+      - 单纯形法在维度一高就会退化，而且每算一次 AUC 要 O(n log n)，
+        十几维时单次搜索要十几分钟；
+      - 贪心选择是**有放回**的（同一个模型可以被选多次），
+        等价于在整数格点上搜索权重，天然非负、天然归一化，
+        而且在 10-20 个模型这个规模上非常稳。
+
+    这是 Caruana 等人在 "Ensemble Selection from Libraries of Models" 里
+    提出的经典做法，至今仍是 Kaggle 上最常用的融合手段之一。
+    """
     n = R.shape[1]
+    counts = np.zeros(n)
 
-    def neg_auc(w: np.ndarray) -> float:
-        w = np.abs(w)
-        s = w.sum()
-        if s == 0:
-            return 0.0
-        return -roc_auc_score(y, R @ (w / s))
+    # 起点用单模型里最好的那个，避免第一步被弱模型带偏
+    best_j = max(range(n), key=lambda k: roc_auc_score(y, R[:, k]))
+    counts[best_j] = 1.0
+    cur = R[:, best_j].copy()
 
-    best_w, best_v = None, np.inf
-    # 多起点：单纯形法容易陷进局部解，用几个不同的初始点提高稳健性
-    for start in (np.ones(n), np.arange(n, 0, -1).astype(float)):
-        res = minimize(
-            neg_auc, start / start.sum(),
-            method="Nelder-Mead", options={"maxiter": 3000, "xatol": 1e-4, "fatol": 1e-7},
-        )
-        if res.fun < best_v:
-            best_v, best_w = res.fun, np.abs(res.x)
-    return best_w / best_w.sum()
+    for _ in range(n_steps):
+        total = counts.sum() + 1
+        best_j, best_auc = None, -np.inf
+        for j in range(n):
+            a = roc_auc_score(y, (cur + R[:, j]) / total)
+            if a > best_auc:
+                best_auc, best_j = a, j
+        counts[best_j] += 1
+        cur += R[:, best_j]
+
+    return counts / counts.sum()
 
 
 def main() -> None:

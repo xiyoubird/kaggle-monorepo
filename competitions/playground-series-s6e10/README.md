@@ -13,6 +13,24 @@
 | 排行榜公开比例 | 20% |
 | 当前规模 | 592 队 / 606 人 / 3440 次提交 |
 
+## 结果
+
+| 阶段 | 本地 OOF AUC | 线上公开榜 |
+|---|---|---|
+| LightGBM 基线（原始特征） | 0.958910 | 0.95843 |
+| + 航线距离目标编码 + 三模型融合 | 0.960505 | 0.96021 |
+| **+ 十七模型贪心融合（最佳）** | **0.960738** | **0.96029** |
+
+公开榜名次从 346 / 595 提升到 **248 / 612**。
+榜单中位数 0.95898、75% 分位 0.96109、第 1 名 0.96167。
+
+### 一句话结论
+
+十个尝试方向里只有一个真正有效：**用精确的 `Flight Distance` 做折内目标编码**
+（+0.0014）。它成立的原因是信号藏在 3474 个距离取值这个高基数结构里，
+而树模型很难自己构造出这种表示。其余方向（外部数据、手工特征工程、
+更大容量、超参搜索）全部在噪声范围内，详见 `docs/`。
+
 ## 为什么是这个问题
 
 Kaggle Playground 系列每题都由一个真实公开数据集"合成"而来：用生成模型
@@ -43,3 +61,44 @@ Kaggle Playground 系列每题都由一个真实公开数据集"合成"而来：
 - `src/` — 脚本，按编号顺序可复现
 - `configs/` — 实验参数
 - `data/`、`outputs/` — 不提交（见根目录 `.gitignore`）
+
+## 复现步骤
+
+```bash
+cd competitions/playground-series-s6e10
+
+# 0. 环境（需要 ~/.kaggle/access_token 或 kaggle.json）
+pip install -r requirements.txt
+
+# 1. 数据
+python src/00_download_data.py        # 比赛数据 -> data/raw/
+python src/03_download_external.py    # 外部原始数据 -> data/external/
+python src/01_eda.py                  # 数据探查
+
+# 2. 基线（两条腿：CV 分数 + 一次线上校准）
+python src/02_baseline_lgbm.py        # OOF 0.958910
+
+# 3. 表示：航线距离目标编码（本项目唯一的有效杠杆）
+python src/09_key_scan.py             # 穷举 231 个分组键，圈定候选
+python src/05_target_encoding_exp.py dist                 # OOF 0.960273
+python src/05_target_encoding_exp.py dist --smooth 2      # OOF 0.960325
+
+# 4. 超参数（结论：收益在噪声量级）
+python src/08_optuna.py --trials 40 --n-splits 3 --timeout 2400
+
+# 5. 多模型
+python src/06_models.py lgb --lgb-params outputs/optuna_lgb_te_best.json --tag _tuned
+python src/06_models.py xgb cat lgb_et lgb_goss xgb_deep
+
+# 6. 贪心融合 + 生成提交文件
+python src/07_blend.py lgb_tuned te_dist_m2 te_all te_dist_ob_cls_cat \
+    te_dist_m5 te_dist xgb te_dist_m50 te_dist_inner5 te_dist_ob_cls \
+    te_dist_ob te_all_nofd te_fine cat lgb_et lgb_goss xgb_deep
+
+# 7. 提交
+kaggle competitions submit -c playground-series-s6e10 \
+    -f outputs/submission_blend.csv -m "message"
+```
+
+注意：`04_experiments.py`（外部数据/特征工程/超参对比）是探索性脚本，
+结论已固化到文档，不需要重跑。

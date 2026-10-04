@@ -22,8 +22,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import time
-from importlib import import_module
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -35,6 +36,15 @@ from cv_runner import run_cv_te
 def key_distance(df: pd.DataFrame) -> pd.Series:
     """分组键：精确航线距离。这是 M3 里唯一被验证有效的表示。"""
     return df["Flight Distance"].astype(str)
+
+
+def family_of(name: str) -> str:
+    """把 "lgb_et"/"xgb_deep" 这类实验名映射回底层库。
+
+    run_cv_te 只认识 lgb / xgb / cat 三种实现，
+    但实验名需要带上变体后缀以便区分保存的预测文件。
+    """
+    return name.split("_")[0]
 
 
 MODELS = {
@@ -71,6 +81,41 @@ MODELS = {
         },
         "desc": "CatBoost（对称树 + 有序目标统计）",
     },
+    # ---- 下面几个不是"更强的模型"，而是"结构不同、犯错方式不同"的模型 ----
+    # 上一轮融合的结论是：贪心选择把最大权重给了相关性最低（0.97）的弱模型，
+    # 而不是最强的模型。所以这里刻意制造多样性。
+    "lgb_et": {
+        "params": {
+            # extra_trees=True 让分裂阈值随机化，树的形状和标准 GBDT 明显不同
+            "objective": "binary", "metric": "auc", "extra_trees": True,
+            "learning_rate": 0.04, "num_leaves": 80, "min_child_samples": 60,
+            "feature_fraction": 0.6, "bagging_fraction": 0.7, "bagging_freq": 1,
+            "lambda_l1": 0.2, "lambda_l2": 1.0,
+            "n_jobs": -1, "verbosity": -1, "seed": SEED + 7,
+        },
+        "desc": "LightGBM + extra_trees（随机化分裂阈值）",
+    },
+    "lgb_goss": {
+        "params": {
+            # GOSS 只对梯度大的样本做分裂，采样方式和标准 GBDT 不同
+            "objective": "binary", "metric": "auc", "boosting": "goss",
+            "learning_rate": 0.05, "num_leaves": 48, "min_child_samples": 40,
+            "feature_fraction": 0.7, "lambda_l1": 0.1, "lambda_l2": 0.5,
+            "n_jobs": -1, "verbosity": -1, "seed": SEED + 13,
+        },
+        "desc": "LightGBM + GOSS（单边梯度采样）",
+    },
+    "xgb_deep": {
+        "params": {
+            "objective": "binary:logistic", "eval_metric": "auc",
+            "tree_method": "hist", "grow_policy": "lossguide",
+            "learning_rate": 0.05, "max_depth": 10, "max_leaves": 96,
+            "min_child_weight": 40, "subsample": 0.7, "colsample_bytree": 0.6,
+            "reg_lambda": 3.0, "reg_alpha": 0.5,
+            "nthread": -1, "seed": SEED + 21,
+        },
+        "desc": "XGBoost + lossguide 深树",
+    },
 }
 
 
@@ -79,6 +124,8 @@ def main() -> None:
     ap.add_argument("models", nargs="*", help=f"可选：{list(MODELS)}")
     ap.add_argument("--smooth", type=float, default=5.0)
     ap.add_argument("--tag", default="")
+    ap.add_argument("--lgb-params", default=None,
+                    help="从 08_optuna.py 产出的 JSON 读取 LightGBM 最优超参")
     args = ap.parse_args()
 
     names = args.models or list(MODELS)
@@ -91,6 +138,24 @@ def main() -> None:
     X, X_test, _X_ext, cat_cols = split_features(train, test, target)
     specs = [("te_dist", key_distance(train).to_numpy(), key_distance(test).to_numpy())]
 
+    if args.lgb_params:
+        blob = json.loads(Path(args.lgb_params).read_text())
+        best = dict(blob["best_params"])
+        # 注意：smooth 是"目标编码的平滑强度"，不是 LightGBM 的参数，
+        # 必须先从字典里摘出来，否则会被当成未知参数传给 LightGBM。
+        # （第一版忘了这步，虽然 LightGBM 只是忽略并警告，但语义是错的。）
+        tuned_smooth = best.pop("smooth", None)
+        MODELS["lgb"]["params"] = {
+            **MODELS["lgb"]["params"], **best,
+            # 这两个是 LightGBM 的运行环境参数，不属于被搜索的对象
+            "objective": "binary", "metric": "auc",
+            "n_jobs": -1, "verbosity": -1, "seed": SEED,
+        }
+        if tuned_smooth is not None and args.smooth == 5.0:
+            args.smooth = float(tuned_smooth)
+        print(f"[超参] 已载入 {args.lgb_params}，smooth={args.smooth}")
+        print(json.dumps(best, indent=2, ensure_ascii=False))
+
     rows = []
     for name in names:
         cfg = MODELS[name]
@@ -98,7 +163,7 @@ def main() -> None:
         print(f"\n{'=' * 72}\n[{run_name}] {cfg['desc']}  平滑 m={args.smooth}")
         t0 = time.time()
         res = run_cv_te(
-            name, X, y, X_test, cfg["params"], cat_cols, specs,
+            family_of(name), X, y, X_test, cfg["params"], cat_cols, specs,
             smooth=args.smooth,
         )
         dt = time.time() - t0

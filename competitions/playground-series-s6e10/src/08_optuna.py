@@ -67,20 +67,26 @@ def main() -> None:
             smooth = trial.suggest_float("smooth", 1.0, 20.0)
         params = {
             "objective": "binary", "metric": "auc",
-            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.08, log=True),
-            "num_leaves": trial.suggest_int("num_leaves", 16, 256, log=True),
-            "min_child_samples": trial.suggest_int("min_child_samples", 10, 400, log=True),
-            "feature_fraction": trial.suggest_float("feature_fraction", 0.4, 1.0),
-            "bagging_fraction": trial.suggest_float("bagging_fraction", 0.5, 1.0),
+            # 搜索范围是刻意收窄的：第一版把 learning_rate 放到 0.01、
+            # num_leaves 放到 256，单组要跑 5-10 分钟，30 组要一个多小时。
+            # 而 M3 已经证明"更大容量没有帮助"，所以没必要在大容量区域浪费预算。
+            "learning_rate": trial.suggest_float("learning_rate", 0.02, 0.10, log=True),
+            "num_leaves": trial.suggest_int("num_leaves", 16, 128, log=True),
+            "min_child_samples": trial.suggest_int("min_child_samples", 20, 300, log=True),
+            "feature_fraction": trial.suggest_float("feature_fraction", 0.5, 1.0),
+            "bagging_fraction": trial.suggest_float("bagging_fraction", 0.6, 1.0),
             "bagging_freq": 1,
-            "lambda_l1": trial.suggest_float("lambda_l1", 1e-3, 20.0, log=True),
-            "lambda_l2": trial.suggest_float("lambda_l2", 1e-3, 20.0, log=True),
-            "max_depth": trial.suggest_int("max_depth", 3, 14),
+            "lambda_l1": trial.suggest_float("lambda_l1", 1e-3, 5.0, log=True),
+            "lambda_l2": trial.suggest_float("lambda_l2", 1e-3, 5.0, log=True),
+            "max_depth": trial.suggest_int("max_depth", 4, 10),
             "n_jobs": -1, "verbosity": -1, "seed": SEED,
         }
         res = run_cv_te(
             "lgb", X, y, X_test, params, cat_cols, specs,
             smooth=smooth, n_splits=args.n_splits, verbose=False,
+            # 迭代上限压到 2500：早停通常在一千上下收敛，
+            # 给到 5000 只是让慢的 trial 白白多跑几分钟
+            num_boost_round=2500, early_stopping=150,
         )
         trial.set_user_attr("mean_best_iter", float(np.mean(res["best_iters"])))
         return res["auc"]
