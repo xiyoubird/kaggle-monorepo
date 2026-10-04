@@ -1,0 +1,28 @@
+# ---- 数据与产物（不提交，避免仓库膨胀）----
+**/data/raw/
+**/data/interim/
+**/data/processed/
+**/outputs/
+**/models/
+**/*.csv
+**/*.parquet
+**/*.npy
+**/*.pkl
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# ---- 凭据（绝对不要提交）----
+kaggle.json
+.kaggle/
+.env
+
+# ---- 编辑器 / 系统 ----
+.DS_Store
+.idea/
+.vscode/
