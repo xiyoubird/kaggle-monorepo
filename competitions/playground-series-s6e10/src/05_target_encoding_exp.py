@@ -71,12 +71,29 @@ def k_cat(df: pd.DataFrame) -> pd.Series:
     return build_keys(df, ["Gender", "Customer Type", "Type of Travel", "Class"])
 
 
+def k_age_ob(df: pd.DataFrame) -> pd.Series:
+    """年龄 × 在线登机评分。
+
+    来自 09_key_scan.py 的扫描结果：这个键有 432 个取值、
+    中位数组 866 行，单键目标编码的独立 AUC 达 0.883，
+    是全场高基数键里最高的。值得试它能否带来增量。
+    """
+    return build_keys(df, ["Age", "Online boarding"])
+
+
+def k_age_cls(df: pd.DataFrame) -> pd.Series:
+    """年龄 × 舱位，扫描里独立 AUC 0.831 的次优高基数键。"""
+    return build_keys(df, ["Age", "Class"])
+
+
 KEY_FUNCS = {
     "dist": k_dist,
     "fine": k_fine,
     "route": k_route_bin,
     "age": k_age,
     "cat": k_cat,
+    "age_ob": k_age_ob,
+    "age_cls": k_age_cls,
 }
 
 # 每个配置 = 用哪几个键 + 是否叠加特征工程
@@ -87,6 +104,9 @@ CONFIGS: dict[str, dict] = {
     "all":      dict(keys=["dist", "fine", "age", "cat"], fe=False),
     "dist_fe":  dict(keys=["dist"], fe=True),
     "all_fe":   dict(keys=["dist", "fine", "age", "cat"], fe=True),
+    "dist_ob":        dict(keys=["dist", "age_ob"], fe=False),
+    "dist_ob_cls":    dict(keys=["dist", "age_ob", "age_cls"], fe=False),
+    "dist_ob_cls_cat": dict(keys=["dist", "age_ob", "age_cls", "cat"], fe=False),
 }
 
 
@@ -108,6 +128,8 @@ def main() -> None:
     ap.add_argument("--smooth", type=float, default=20.0, help="目标编码平滑强度 m")
     ap.add_argument("--tag", default="", help="结果文件名的附加标记")
     ap.add_argument("--no-fd", action="store_true", help="从特征中移除原始 Flight Distance 列")
+    ap.add_argument("--inner", type=int, default=1,
+                    help="折内再折的折数；>1 时训练行的编码值不含其自身标签")
     args = ap.parse_args()
 
     names = args.configs or list(CONFIGS)
@@ -136,10 +158,14 @@ def main() -> None:
         )
 
         run_name = f"te_{name}{args.tag}" + ("_nofd" if args.no_fd else "")
-        print(f"\n{'=' * 72}\n[{run_name}] 键={cfg['keys']} 特征工程={cfg['fe']} m={args.smooth}")
+        print(f"\n{'=' * 72}\n[{run_name}] 键={cfg['keys']} 特征工程={cfg['fe']} "
+              f"m={args.smooth} 折内再折={args.inner}")
 
         t0 = time.time()
-        res = run_lgb_cv_te(X, y, X_test, PARAMS_BASE, cat_cols, specs, smooth=args.smooth)
+        res = run_lgb_cv_te(
+            X, y, X_test, PARAMS_BASE, cat_cols, specs,
+            smooth=args.smooth, inner_folds=args.inner,
+        )
         dt = time.time() - t0
         print(f"  >> OOF AUC = {res['auc']:.6f}  (耗时 {dt:.0f}s)")
 

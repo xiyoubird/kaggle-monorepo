@@ -130,13 +130,13 @@ def split_features(
     return X, X_test, X_ext, cat_cols
 
 
-def make_folds(y: np.ndarray):
+def make_folds(y: np.ndarray, n_splits: int = N_SPLITS, seed: int = SEED):
     """分层 K 折。
 
     用 StratifiedKFold 而不是普通 KFold：保证每折里正负样本比例一致，
     否则各折 AUC 会因为比例波动而互相不可比。
     """
-    skf = StratifiedKFold(n_splits=N_SPLITS, shuffle=True, random_state=SEED)
+    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
     return list(skf.split(np.zeros(len(y)), y))
 
 
