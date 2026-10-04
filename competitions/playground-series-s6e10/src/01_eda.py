@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 RAW_DIR = ROOT / "data" / "raw"
 
 
-def profile(name: str, df: pd.DataFrame, target: str | None) -> None:
+def profile(name: str, df: pd.DataFrame, target: str | None, positive=None) -> None:
     print("=" * 78)
     print(f"{name}: {df.shape[0]:,} 行 × {df.shape[1]} 列")
     print("=" * 78)
@@ -53,7 +53,11 @@ def profile(name: str, df: pd.DataFrame, target: str | None) -> None:
         print(f"\n-- 目标变量 {target} --")
         vc = df[target].value_counts(dropna=False)
         print(vc.to_string())
-        print("正样本占比:", round(vc.iloc[0] / len(df), 4))
+        # 注意：这里必须明确"正类"是哪一个值，不能想当然用 value_counts 的第一个
+        # （它按出现次数降序排列，不代表正类）。本比赛约定 True = satisfied = 正类。
+        if positive is not None:
+            rate = (df[target] == positive).mean()
+            print(f"正类 ({positive!r}) 占比: {rate:.6f}")
 
 
 def main() -> None:
@@ -70,7 +74,16 @@ def main() -> None:
         test = pd.read_csv(test_path)
         target = next((c for c in train.columns if c not in test.columns and c != "id"), None)
         print(f"推断目标列 = {target}\n")
-        profile("train.csv", train, target)
+        # 先猜正类：布尔/0-1 列取 True/1；字符串列优先取 "satisfied"
+        col = train[target]
+        if col.dtype == bool:
+            positive = True
+        elif pd.api.types.is_numeric_dtype(col):
+            positive = 1
+        else:
+            positive = "satisfied" if (col.astype(str).str.lower() == "satisfied").any() else None
+
+        profile("train.csv", train, target, positive)
         profile("test.csv", test, None)
     else:
         # 兜底：把所有 csv 都打印一遍，方便人工判断

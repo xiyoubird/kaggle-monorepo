@@ -28,7 +28,7 @@ def main() -> None:
     print(f"训练集 {train.shape} / 测试集 {test.shape} / 目标列 '{target}'")
 
     y = encode_target(train[target])
-    X, X_test, cat_cols = split_features(train, test, target)
+    X, X_test, _X_ext, cat_cols = split_features(train, test, target)
     print(f"特征数 {X.shape[1]}，其中类别列 {len(cat_cols)} 个：{cat_cols}")
     print(f"正样本占比 {y.mean():.4f}")
 

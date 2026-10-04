@@ -15,6 +15,7 @@ from sklearn.model_selection import StratifiedKFold
 
 ROOT = Path(__file__).resolve().parents[1]
 RAW_DIR = ROOT / "data" / "raw"
+EXTERNAL_DIR = ROOT / "data" / "external"
 OUT_DIR = ROOT / "outputs"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -40,6 +41,19 @@ def load_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, str]:
     return train, test, sample, target
 
 
+def load_external(target: str = "satisfaction") -> pd.DataFrame | None:
+    """读取外部原始数据集（比赛说明里链接的那份）。
+
+    找不到时返回 None，让调用方可以优雅降级为"只用比赛数据"。
+    """
+    path = EXTERNAL_DIR / "data.csv"
+    if not path.exists():
+        return None
+    ext = pd.read_csv(path)
+    assert target in ext.columns, f"外部数据缺少目标列 {target}"
+    return ext
+
+
 def encode_target(y: pd.Series) -> np.ndarray:
     """把目标转成 0/1。AUC 只关心顺序，所以约定"我们关注的那一类"为 1。
 
@@ -63,8 +77,13 @@ def encode_target(y: pd.Series) -> np.ndarray:
 
 
 def split_features(
-    train: pd.DataFrame, test: pd.DataFrame, target: str
-) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
+    train: pd.DataFrame,
+    test: pd.DataFrame,
+    target: str,
+    external: pd.DataFrame | None = None,
+    feature_fn=None,
+    keep_id: bool = False,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame | None, list[str]]:
     """切出特征矩阵，并返回类别列名单。
 
     做法：
@@ -72,24 +91,43 @@ def split_features(
     - 把"唯一值不超过 50 个"的非数值列统一声明为 pandas category，
       这样 LightGBM / CatBoost / XGBoost 都能按类别处理，而不是
       错误地当成连续数字（例如把 "Business" 当成 2 > "Economy" = 1）。
+    - 如果有外部数据，让它和 train/test 共用同一套类别字典，
+      否则同一个 "Business" 在两份数据里会被编码成不同的整数，模型会学乱。
     """
-    drop = [c for c in (target, "id") if c in train.columns]
+    # keep_id=True 时保留 id 作为特征，用于检验"合成数据是否按 id 顺序生成"这类泄漏
+    drop = [c for c in (target, "id") if c in train.columns and not (keep_id and c == "id")]
     X = train.drop(columns=drop).copy()
     X_test = test.drop(columns=[c for c in drop if c in test.columns]).copy()
 
     # test 可能没有 id 列以外的差异，这里保证列顺序一致
     X_test = X_test[X.columns]
 
+    X_ext = None
+    if external is not None:
+        X_ext = external.drop(columns=[c for c in drop if c in external.columns]).copy()
+        X_ext = X_ext[X.columns]
+
+    # 特征工程（可选）：在类别编码之前做，方便按原始数值构造新特征
+    if feature_fn is not None:
+        X = feature_fn(X)
+        X_test = feature_fn(X_test)
+        if X_ext is not None:
+            X_ext = feature_fn(X_ext)
+
     # 非数值列一律当类别处理
     cat_cols = [c for c in X.columns if (not pd.api.types.is_numeric_dtype(X[c]))]
 
+    frames = [X, X_test] + ([X_ext] if X_ext is not None else [])
     for c in cat_cols:
-        # 用所有取值（train+test）建立统一的类别字典，避免两边编码不一致
-        categories = pd.Index(sorted(set(X[c].dropna().astype(str)) | set(X_test[c].dropna().astype(str))))
-        X[c] = pd.Categorical(X[c].astype(str), categories=categories)
-        X_test[c] = pd.Categorical(X_test[c].astype(str), categories=categories)
+        # 用所有数据源的取值并集建立类别字典，保证编码一致
+        values: set[str] = set()
+        for f in frames:
+            values |= set(f[c].dropna().astype(str))
+        categories = pd.Index(sorted(values))
+        for f in frames:
+            f[c] = pd.Categorical(f[c].astype(str), categories=categories)
 
-    return X, X_test, cat_cols
+    return X, X_test, X_ext, cat_cols
 
 
 def make_folds(y: np.ndarray):
