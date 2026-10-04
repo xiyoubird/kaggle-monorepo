@@ -144,3 +144,73 @@ def run_xgb_cv(
         "oof": oof, "test_pred": test_pred, "auc": auc,
         "fold_scores": fold_scores, "best_iters": best_iters,
     }
+
+
+def run_lgb_cv_te(
+    X: pd.DataFrame,
+    y: np.ndarray,
+    X_test: pd.DataFrame,
+    params: dict,
+    cat_cols: list[str],
+    te_specs: list[tuple[str, np.ndarray, np.ndarray]],
+    smooth: float = 20.0,
+    num_boost_round: int = 5000,
+    early_stopping: int = 200,
+    verbose: bool = True,
+) -> dict:
+    """带折内目标编码的 LightGBM 交叉验证。
+
+    te_specs 里每一项是 (特征名, 训练集分组键, 测试集分组键)，
+    分组键是与 X / X_test **按位置对齐**的字符串数组。
+    分组键本身不依赖目标，所以可以在折外一次算好；
+    编码表则必须在每折内部单独拟合，否则会泄漏。
+
+    把分组键和特征矩阵分开传，是为了支持"用某列造编码、但不把该列本身喂给模型"
+    这类消融实验（例如用 Flight Distance 造航线编码，同时移除原始距离列）。
+    """
+    import lightgbm as lgb
+    from target_encoding import apply_encoding, fit_encoding
+
+    train_keys = {name: pd.Series(tr_keys) for name, tr_keys, _ in te_specs}
+    test_keys = {name: pd.Series(te_keys) for name, _, te_keys in te_specs}
+    te_cols = [name for name, _, _ in te_specs]
+
+    folds = make_folds(y)
+    oof = np.zeros(len(X))
+    test_pred = np.zeros(len(X_test))
+    fold_scores: list[float] = []
+    best_iters: list[int] = []
+
+    for i, (tr_idx, va_idx) in enumerate(folds, 1):
+        X_tr = X.iloc[tr_idx].copy()
+        X_va = X.iloc[va_idx].copy()
+        X_te = X_test.copy()
+        y_tr, y_va = y[tr_idx], y[va_idx]
+        prior = float(y_tr.mean())
+
+        for name in te_cols:
+            table = fit_encoding(train_keys[name].iloc[tr_idx], y_tr, prior, smooth)
+            # 注意：训练部分也用它自己算出的表，
+            # 这是标准做法，但理论上训练分数会偏乐观（不影响验证与 OOF）
+            X_tr[name] = apply_encoding(train_keys[name].iloc[tr_idx], table, prior)
+            X_va[name] = apply_encoding(train_keys[name].iloc[va_idx], table, prior)
+            X_te[name] = apply_encoding(test_keys[name], table, prior)
+
+        dtr = lgb.Dataset(X_tr, y_tr, categorical_feature=cat_cols)
+        dva = lgb.Dataset(X_va, y_va, categorical_feature=cat_cols, reference=dtr)
+        model = lgb.train(
+            params, dtr, num_boost_round=num_boost_round, valid_sets=[dva],
+            callbacks=[lgb.early_stopping(early_stopping, verbose=False), lgb.log_evaluation(0)],
+        )
+
+        oof[va_idx] = model.predict(X_va, num_iteration=model.best_iteration)
+        test_pred += model.predict(X_te, num_iteration=model.best_iteration) / len(folds)
+        fold_scores.append(roc_auc_score(y_va, oof[va_idx]))
+        best_iters.append(model.best_iteration)
+        if verbose:
+            print(f"    fold {i}: AUC={fold_scores[-1]:.6f}  best_iter={model.best_iteration}")
+
+    return {
+        "oof": oof, "test_pred": test_pred, "auc": roc_auc_score(y, oof),
+        "fold_scores": fold_scores, "best_iters": best_iters,
+    }
